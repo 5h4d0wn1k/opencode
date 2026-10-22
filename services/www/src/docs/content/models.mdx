@@ -57,6 +57,24 @@ falls back to the newest available supported model.
 
 See [Config](/config) for configuration locations and precedence.
 
+## Free models
+
+Set `OPENCODE_DISABLE_FREE_MODELS=1` (or `true`) on the server process to hide [free OpenCode models](/console/models#free-models):
+
+```bash
+OPENCODE_DISABLE_FREE_MODELS=1 opencode serve
+```
+
+For the shared background server:
+
+```bash
+opencode service set env OPENCODE_DISABLE_FREE_MODELS 1
+```
+
+Free means an `opencode` or `opencode-go` model with no input price. These models disappear from the catalog and defaults;
+explicitly selecting one fails with `Model unavailable`. Signed out, the `opencode` provider is absent until you connect
+an OpenCode Console account or set `OPENCODE_API_KEY`, which restores its paid models.
+
 ## Variants
 
 Variants are named options for one model, often used for reasoning effort or token budgets. Add `#variant` when selecting
@@ -104,6 +122,37 @@ Define new variants, or replace catalog variants with the same ID, in the model'
 ```
 
 Each variant can contain `settings`, `headers`, and `body`. Its values are applied after provider and model values.
+
+To replace a model's reasoning variants, describe its reasoning controls in `capabilities.reasoning`, using the
+[models.dev](https://models.dev) v2 shape. OpenCode builds the variants for the model's package from them:
+
+```jsonc title="opencode.jsonc"
+{
+  "providers": {
+    "openai": {
+      "models": {
+        "gpt-5.2": {
+          "capabilities": {
+            "reasoning": {
+              "supported": true,
+              "effort": ["low", "medium", "high"],
+            },
+          },
+        },
+      },
+    },
+  },
+}
+```
+
+| Field       | Purpose                                                                    |
+| ----------- | -------------------------------------------------------------------------- |
+| `supported` | Whether the model reasons. `false`, or `true` without controls, adds no variants. |
+| `toggle`    | Adds a `none` variant that turns reasoning off.                             |
+| `effort`    | Effort levels to offer. `default` keeps the provider default and adds no variant. |
+| `budget`    | Optional `min` and `max` thinking tokens. Ignored when `effort` is set.     |
+
+Variants listed in `variants` are applied on top of the ones built from `capabilities.reasoning`.
 
 ## Options
 
@@ -225,6 +274,38 @@ For an OpenAI-compatible model that streams reasoning in a custom assistant-mess
 OpenCode recognizes `reasoning`, `reasoning_content`, and `reasoning_text`, and also accepts another provider-specific
 string. It reads streamed reasoning from that field and restores the field when sending prior assistant messages back to
 the model.
+
+## Prompt caching
+
+OpenCode places prompt-cache breakpoints automatically on routes that are known to need them, such as Anthropic. When
+Claude models are served through an OpenAI-compatible proxy such as LiteLLM, OpenCode cannot tell that they need
+Anthropic-style `cache_control` breakpoints. Set `compatibility.cacheFormat` on those Claude models:
+
+```jsonc title="opencode.jsonc"
+{
+  "providers": {
+    "litellm": {
+      "package": "@opencode/ai/providers/openai-compatible",
+      "settings": { "baseURL": "https://litellm.example.com/v1" },
+      "models": {
+        "claude-sonnet-5": {
+          "compatibility": { "cacheFormat": "anthropic" },
+        },
+        "claude-opus-5-5": {
+          "compatibility": { "cacheFormat": "anthropic" },
+        },
+        // Other models on the same proxy cache automatically and need no setting.
+        "gpt-6.1": {},
+      },
+    },
+  },
+}
+```
+
+OpenCode then marks the last tool definition, the system prompt, and the latest message with
+`cache_control: { "type": "ephemeral" }`, which uses the endpoint's default five-minute cache lifetime. Use `"alibaba"`
+for Alibaba Model Studio models, which accept the same markers but ignore them on tool definitions. Set
+`compatibility.cacheFormat` on the provider instead when every model it serves accepts the same format.
 
 ## Local
 

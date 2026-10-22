@@ -30,7 +30,11 @@ const base64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB"
 
 const capture = (
   providerMetadataKey = "anthropic",
-  options?: { readonly interruptProgress?: boolean; readonly beforeTextDelta?: Effect.Effect<void> },
+  options?: {
+    readonly interruptProgress?: boolean
+    readonly beforeTextDelta?: Effect.Effect<void>
+    readonly pendingSnapshot?: Effect.Effect<Snapshot.ID | undefined>
+  },
 ) => {
   const published: Array<{ readonly type: string; readonly data: unknown }> = []
   const bus: Pick<Bus.Interface, "publish"> = {
@@ -60,6 +64,7 @@ const capture = (
         providerID: Provider.ID.opencode,
       },
       providerMetadataKey,
+      pendingSnapshot: options?.pendingSnapshot,
       started: 0,
       assistantMessageID: SessionMessage.ID.create(),
     }),
@@ -127,7 +132,7 @@ test("provider-executed success derives content and retains provider result stat
       { type: "text", text: "Image read successfully" },
       { type: "file", uri: `data:image/png;base64,${base64}`, mime: "image/png" },
     ],
-    resultState: { result: { type: "content" } },
+    native: { result: { type: "content" } },
   })
 })
 
@@ -299,7 +304,7 @@ test("provider metadata is flattened using the route key", async () => {
   )
 
   expect(published.find((event) => event.type === "session.reasoning.started.1")?.data).toMatchObject({
-    state: { signature: "signed" },
+    native: { signature: "signed" },
   })
 })
 
@@ -326,7 +331,7 @@ test("reasoning state from start, empty delta, and end is merged", async () => {
   )
 
   expect(published.find((event) => event.type === "session.reasoning.ended.1")?.data).toMatchObject({
-    state: { blockType: "thinking", signature: "signed", stopReason: "tool_use" },
+    native: { blockType: "thinking", signature: "signed", stopReason: "tool_use" },
   })
 })
 
@@ -548,10 +553,10 @@ test("provider-executed tool metadata is flattened using the route key", async (
   )
 
   expect(published.find((event) => event.type === "session.tool.called.1")?.data).toMatchObject({
-    state: { itemId: "call" },
+    native: { itemId: "call" },
   })
   expect(published.find((event) => event.type === "session.tool.success.2")?.data).toMatchObject({
-    resultState: { itemId: "result" },
+    native: { itemId: "result" },
   })
 })
 
@@ -563,21 +568,35 @@ test("binary failure emits no success event", async () => {
   expect(published.some((event) => event.type === "session.tool.failed.2")).toBe(true)
 })
 
-test("success event data can carry provider-executed result state", () => {
+test("success event data can carry provider-executed native data", () => {
   const decoded = Schema.decodeUnknownSync(SessionEvent.Tool.Success.data)({
     sessionID,
     assistantMessageID: SessionMessage.ID.create(),
     id: "call-old",
     content: [{ type: "file", uri: `data:image/png;base64,${base64}`, mime: "image/png" }],
     executed: true,
-    resultState: {
+    native: {
       result: {
         type: "content",
         value: [{ type: "file", uri: `data:image/png;base64,${base64}`, mime: "image/png" }],
       },
     },
   })
-  expect(decoded.resultState).toMatchObject({ result: { type: "content" } })
+  expect(decoded.native).toMatchObject({ result: { type: "content" } })
+})
+
+test("step start waits for the pending start snapshot", async () => {
+  const snapshot = Effect.runSync(Deferred.make<Snapshot.ID | undefined>())
+  const { published, publisher } = capture("anthropic", { pendingSnapshot: Deferred.await(snapshot) })
+  const started = Effect.runFork(publisher.publish(LLMEvent.stepStart({ index: 0 })))
+  await Effect.runPromise(Effect.yieldNow)
+  expect(published).toEqual([])
+
+  Effect.runSync(Deferred.succeed(snapshot, Snapshot.ID.make("tree-start")))
+  await Effect.runPromise(Fiber.join(started))
+  expect(published.map((event) => [event.type, (event.data as { snapshot?: string }).snapshot])).toEqual([
+    ["session.step.started.1", "tree-start"],
+  ])
 })
 
 test("step finish records settlement without publishing step ended", async () => {
@@ -616,7 +635,7 @@ test("content-filter finish retains failure evidence until step closeout", async
   expect(settlement).toMatchObject({
     finish: "content-filter",
     rawFinish: "refusal",
-    providerState: {
+    native: {
       stopDetails: { type: "refusal", category: "safety", explanation: "Blocked" },
     },
     tokens: { input: 8, output: 2, reasoning: 1 },
@@ -635,7 +654,7 @@ test("content-filter finish retains failure evidence until step closeout", async
     error: { type: "provider.content-filter", message: "Provider blocked the response" },
     finish: "content-filter",
     rawFinish: "refusal",
-    providerState: {
+    native: {
       stopDetails: { type: "refusal", category: "safety", explanation: "Blocked" },
     },
     cost: 1.25,
@@ -665,5 +684,31 @@ test("content-filter finish preserves partial streamed text and never ends the s
   expect(published.find((event) => event.type === "session.text.ended.1")?.data).toMatchObject({ text: "Partial" })
   expect(published.find((event) => event.type === "session.step.failed.1")?.data).toMatchObject({
     error: { type: "provider.content-filter" },
+  })
+})
+
+test("content-filter failure explains the refusal when the provider gives a reason", async () => {
+  const { published, publisher } = capture()
+  await Effect.runPromise(publisher.publish(LLMEvent.stepStart({ index: 0 })))
+  await Effect.runPromise(
+    publisher.publish(
+      LLMEvent.stepFinish({
+        index: 0,
+        reason: {
+          normalized: "content-filter",
+          raw: "refusal",
+          category: "cyber",
+          explanation: "This request was declined because it could enable cyber harm.",
+        },
+      }),
+    ),
+  )
+  await Effect.runPromise(publisher.publishStepFailure())
+
+  expect(published.at(-1)?.data).toMatchObject({
+    error: {
+      type: "provider.content-filter",
+      message: "Provider blocked the response (cyber): This request was declined because it could enable cyber harm.",
+    },
   })
 })

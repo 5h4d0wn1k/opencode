@@ -1,7 +1,7 @@
 export * as SessionRunnerLLM from "./llm.js"
 
 import { Message } from "@opencode/ai"
-import { and, desc, eq, sql } from "drizzle-orm"
+import { and, desc, eq, inArray, sql } from "drizzle-orm"
 import { Cause, Effect, Exit, FiberMap, Layer } from "effect"
 import { Database } from "../../database/database.js"
 import { Bus } from "../../bus.js"
@@ -12,7 +12,6 @@ import { SessionContext } from "../context.js"
 import { SessionEvent } from "../event.js"
 import { SessionInbox } from "../inbox.js"
 import { SessionHistory } from "../history.js"
-import { SessionProviderContext } from "../provider-context.js"
 import { SessionModelRequest } from "../model-request.js"
 import { SessionModelTransport } from "../model-transport.js"
 import { SessionMessage } from "../message.js"
@@ -34,6 +33,9 @@ import { MAX_STEPS_PROMPT } from "./max-steps.js"
 
 const CONTINUE_AFTER_INCOMPLETE_STREAM =
   "The previous response was interrupted. Continue from where you left off without repeating completed content."
+
+const CONTINUE_AFTER_OUTPUT_LIMIT =
+  "Your last response hit the output token limit (stop reason: length). Do not apologize, recap, or repeat yourself. Break the remaining work into smaller pieces."
 
 const layer = Layer.effect(
   Service,
@@ -88,7 +90,7 @@ const layer = Layer.effect(
                   if (next?.type === "compaction")
                     yield* bus.publishAll([
                       [SessionEvent.InboxDelivered, { sessionID, inboxID: next.id }],
-                      [SessionEvent.Compaction.Started, { sessionID, reason: "manual", recent: "", inputID: next.id }],
+                      [SessionEvent.Compaction.Started, { sessionID, reason: "manual", inputID: next.id }],
                     ])
                   if (next?.type === "move")
                     yield* restore(
@@ -115,12 +117,7 @@ const layer = Layer.effect(
                     const selected = yield* context.select(sessionID)
                     const model = yield* context.resolveModel(selected.session)
                     // Preview updates without admitting them after the already-delivered compaction marker.
-                    const history = yield* SessionHistory.preview(
-                      db,
-                      sessionID,
-                      selected.instructions,
-                      SessionProviderContext.provenance(model) ?? "local",
-                    )
+                    const history = yield* SessionHistory.preview(db, sessionID, selected.instructions, model.ref)
                     return yield* compaction.compact({
                       reason: "manual",
                       inputID: pending.id,
@@ -240,6 +237,7 @@ const layer = Layer.effect(
           // Keep tool definitions on the final Step to preserve the provider's cached prefix.
           toolChoice: stepLimitReached ? "none" : undefined,
           webSocket: "session",
+          inputTokens: SessionCompaction.estimatePrompt(loaded),
         })
         const outcome = yield* steps.attempt({
           isLocationClosed: lifecycle.isClosed,
@@ -281,6 +279,36 @@ const layer = Layer.effect(
               assistantMessageID,
             })
             yield* bus.publish(SessionEvent.Synthetic, { sessionID, text: CONTINUE_AFTER_INCOMPLETE_STREAM })
+            assistantMessageID = SessionMessage.ID.create()
+          }),
+          OutputLimit: Effect.fn("SessionRunner.continueOutputLimit")(function* (outcome) {
+            // The current response is included. User input or any other finish breaks the streak.
+            const rows = yield* db
+              .select()
+              .from(SessionMessageTable)
+              .where(
+                and(
+                  eq(SessionMessageTable.session_id, sessionID),
+                  inArray(SessionMessageTable.type, ["user", "assistant"]),
+                ),
+              )
+              .orderBy(desc(SessionMessageTable.seq))
+              .limit(3)
+              .all()
+              .pipe(Effect.orDie)
+            const recent = yield* Effect.forEach(rows, SessionHistory.decodeMessageRow)
+            const exhausted =
+              recent.length === 3 &&
+              recent.every((message) => message.type === "assistant" && message.finish === "length")
+            if (exhausted)
+              return yield* new StepFailedError({
+                error: {
+                  type: "output-limit",
+                  message: "Response still truncated after two output token limit continuations",
+                },
+              })
+            if (outcome.needsContinuation) return true
+            yield* bus.publish(SessionEvent.Synthetic, { sessionID, text: CONTINUE_AFTER_OUTPUT_LIMIT })
             assistantMessageID = SessionMessage.ID.create()
           }),
           Compacted: Effect.fnUntraced(function* () {

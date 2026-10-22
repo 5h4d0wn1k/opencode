@@ -132,7 +132,7 @@ const makeRouteLanguageModel = <Options extends ProviderOptions, Compact extends
 ) => {
   const provider = route.provider ?? ("provider" in mapped ? mapped.provider : undefined)
   if (!provider) throw new Error(`Route.model(${route.id}) requires a provider`)
-  if (!endpointBaseURL(route.endpoint))
+  if (!route.endpoint.baseURL)
     throw new ProviderConfigurationError({
       provider: ProviderID.make(provider),
       message: `Route.model(${route.id}) requires an endpoint baseURL — configure it on the route first`,
@@ -159,9 +159,6 @@ const mergeRouteDefaults = (base: RouteDefaults | undefined, patch: RouteDefault
     ),
   }
 }
-
-const endpointBaseURL = <Body>(endpoint: Endpoint.Definition<Body>) =>
-  typeof endpoint.baseURL === "string" ? endpoint.baseURL : undefined
 
 const mergeHeaders = (...items: ReadonlyArray<Record<string, string> | undefined>) => {
   const entries = items.flatMap((item) =>
@@ -358,7 +355,6 @@ function makeFromTransport<Body, Prepared, Frame, Event, State>(
   input: MakeTransportInput<Body, Prepared, Frame, Event, State>,
 ): Route<Body, Prepared> {
   const protocol = input.protocol
-  const encodeBody = Schema.encodeSync(Schema.fromJsonString(protocol.body.schema))
   const decodeEventEffect = Schema.decodeUnknownEffect(protocol.stream.event)
   const decodeEvent = (route: string) => (frame: Frame) =>
     decodeEventEffect(frame).pipe(
@@ -417,7 +413,7 @@ function makeFromTransport<Body, Prepared, Frame, Event, State>(
           request,
           endpoint: routeInput.endpoint,
           auth: routeInput.auth ?? Auth.none,
-          encodeBody,
+          encodeBody: ProviderShared.encodeJson,
           middleware: options?.http,
           webSocket: options?.webSocket,
         }),
@@ -576,9 +572,7 @@ const compile = Effect.fn("LLM.compile")(function* (request: LLMRequest, options
   const resolved = prepareRequest(request)
   const route = resolved.model.route
 
-  const body = yield* route.body
-    .from(resolved)
-    .pipe(Effect.flatMap(ProviderShared.validateWith(Schema.decodeUnknownEffect(route.body.schema))))
+  const body = yield* route.body.from(resolved)
   const prepared = yield* route.prepareTransport(body, resolved, options)
 
   return {
@@ -649,13 +643,6 @@ export function compact(request: LLMRequest, options?: EndpointCompactOptions | 
     return yield* unsupportedCompaction(request, options?.mechanism)
   })
 }
-
-export const streamRequest = (request: LLMRequest, options?: StreamOptions) =>
-  Stream.unwrap(
-    Effect.gen(function* () {
-      return (yield* Service).stream(request, options)
-    }),
-  )
 
 export const layer: Layer.Layer<Service, never, RequestExecutor.Service> = Layer.effect(
   Service,

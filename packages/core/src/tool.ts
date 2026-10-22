@@ -155,7 +155,9 @@ const layer = Layer.effect(
       }
     })
 
-    let catalog: { data: Data; names: string; value: CodeModeCatalog.Inventory } | undefined
+    let catalog:
+      | { data: Data; names: string; inventory: CodeModeTool.Inventory; value: CodeModeCatalog.Inventory }
+      | undefined
     const state = State.create<Data, Editor>({
       name: "tool",
       initial: () => ({
@@ -233,9 +235,13 @@ const layer = Layer.effect(
           }
           const direct = new Map(Array.from(active).filter(([, tool]) => tool.options?.codemode === false))
           const codeModeTools = new Map(Array.from(active).filter(([, tool]) => tool.options?.codemode !== false))
-          const namespaces = data.namespaces
-          const codeModeInventory = { tools: codeModeTools, namespaces }
+          const names = Array.from(codeModeTools.keys()).join("\0")
           const codeModeEnabled = !whollyDisabled("execute", rules)
+          // Discovery is immutable for a registry revision and visible tool set. Keep request
+          // definitions/executors fresh, but share the inventory, whose prepared runtime and much
+          // larger rendered catalog are cached by identity, across steps.
+          const cached = catalog?.data === data && catalog.names === names ? catalog : undefined
+          const codeModeInventory = cached?.inventory ?? { tools: codeModeTools, namespaces: data.namespaces }
           const codeModeTool = codeModeEnabled
             ? CodeModeTool.create(codeModeInventory, (name, tool, input, context) =>
                 beforeExecute(name, input, context).pipe(
@@ -243,15 +249,10 @@ const layer = Layer.effect(
                 ),
               )
             : undefined
-          const names = Array.from(codeModeTools.keys()).join("\0")
-          // Discovery is immutable for a registry revision and visible tool set. Keep request
-          // definitions/executors fresh, but share the much larger rendered catalog across steps.
           const codeModeCatalog = !codeModeEnabled
             ? undefined
-            : catalog?.data === data && catalog.names === names
-              ? catalog.value
-              : CodeModeTool.catalog(codeModeInventory)
-          if (codeModeCatalog) catalog = { data, names, value: codeModeCatalog }
+            : (cached?.value ?? CodeModeTool.catalog(codeModeInventory))
+          if (codeModeCatalog) catalog = { data, names, inventory: codeModeInventory, value: codeModeCatalog }
           return {
             ...(codeModeCatalog === undefined ? {} : { codeModeCatalog }),
             definitions: [
@@ -308,7 +309,7 @@ function registrationError(tool: Tool.Info) {
     if (error) return error
   }
   const name = normalizedName(tool)
-  if (!/^[A-Za-z0-9_-]{1,128}$/.test(name)) return new RegistrationError({ name, message: `Invalid tool name: ${name}` })
+  if (!/^[A-Za-z0-9_-]+$/.test(name)) return new RegistrationError({ name, message: `Invalid tool name: ${name}` })
   const id = effectiveName(tool)
   if (tool.options?.codemode === false && id === "execute")
     return new RegistrationError({ name: id, message: 'Tool name "execute" is reserved for CodeMode' })
@@ -321,7 +322,7 @@ function registrationError(tool: Tool.Info) {
 }
 
 function namespaceError(name: string) {
-  if (name.split(".").every((segment) => /^[A-Za-z0-9_-]{1,64}$/.test(segment))) return
+  if (name.split(".").every((segment) => /^[A-Za-z0-9_-]+$/.test(segment))) return
   return new RegistrationError({ name, message: `Invalid tool namespace: ${JSON.stringify(name)}` })
 }
 

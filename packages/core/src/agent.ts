@@ -1,15 +1,10 @@
 export * as Agent from "./agent.js"
 
-import path from "path"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { Array, Context, Effect, Layer, Types } from "effect"
 import { Agent } from "@opencode/schema/agent"
-import { Global } from "@opencode/util/global"
 import { Bus } from "./bus.js"
 import { State } from "./state.js"
-
-const SHELL_OUTPUT_GLOB = (data: string) => path.join(data, "shell", "*", "*")
-const TOOL_OUTPUT_GLOB = (data: string) => path.join(data, "tool-output", "*")
 
 export const ID = Agent.ID
 export type ID = typeof ID.Type
@@ -35,8 +30,8 @@ type Data = {
 }
 
 export type Editor = {
-  list: () => readonly Info[]
-  get: (id: ID) => Info | undefined
+  list: () => readonly Types.DeepMutable<Info>[]
+  get: (id: ID) => Types.DeepMutable<Info> | undefined
   default: (id: ID | undefined) => void
   update: (id: ID, fn: (agent: Types.DeepMutable<Info>) => void) => void
   remove: (id: ID) => void
@@ -45,7 +40,7 @@ export type Editor = {
 export interface Interface extends State.Transformable<Editor> {
   readonly get: (id: ID) => Effect.Effect<Info | undefined>
   readonly resolve: (id?: ID | string) => Effect.Effect<Info | undefined>
-  readonly select: (id?: ID | string) => Effect.Effect<Selection>
+  readonly select: (id?: ID) => Effect.Effect<Selection>
   readonly list: () => Effect.Effect<Info[]>
 }
 
@@ -55,30 +50,17 @@ const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const bus = yield* Bus.Service
-    const global = yield* Global.Service
-    const permissions: Info["permissions"] = [
-      { action: "external_directory", resource: SHELL_OUTPUT_GLOB(global.data), effect: "allow" },
-      { action: "external_directory", resource: TOOL_OUTPUT_GLOB(global.data), effect: "allow" },
-      { action: "external_directory", resource: path.join(global.tmp, "*"), effect: "allow" },
-      { action: "external_directory", resource: path.join(global.config, "*"), effect: "allow" },
-    ]
     const state = State.create<Data, Editor>({
       name: "agent",
       initial: () => ({ agents: new Map() }),
       editor: (editor) => ({
-        list: () => Array.fromIterable(editor.agents.values()) as Info[],
+        list: () => Array.fromIterable(editor.agents.values()),
         get: (id) => editor.agents.get(id),
         default: (id) => {
           editor.default = id
         },
         update: (id, fn) => {
-          const defaults = Info.default(id)
-          const current =
-            editor.agents.get(id) ??
-            ({
-              ...defaults,
-              permissions: [...defaults.permissions, ...permissions],
-            } as Types.DeepMutable<Info>)
+          const current = editor.agents.get(id) ?? (Info.default(id) as Types.DeepMutable<Info>)
           if (!editor.agents.has(id)) editor.agents.set(id, current)
           fn(current)
           current.id = id
@@ -95,7 +77,7 @@ const layer = Layer.effect(
       const data = state.get()
       const configured = data.default ? selectable(data.agents.get(data.default)) : undefined
       if (configured) return configured
-      const build = selectable(data.agents.get(ID.make("build")))
+      const build = selectable(data.agents.get(defaultID))
       if (build) return build
       for (const agent of data.agents.values()) {
         const fallback = selectable(agent)
@@ -114,10 +96,7 @@ const layer = Layer.effect(
         return selectedDefault()
       }),
       select: Effect.fn("Agent.select")(function* (id) {
-        if (id !== undefined) {
-          const selected = ID.make(id)
-          return { id: selected, info: state.get().agents.get(selected) }
-        }
+        if (id !== undefined) return { id, info: state.get().agents.get(id) }
         const info = selectedDefault()
         return { id: info?.id ?? defaultID, info }
       }),
@@ -131,4 +110,4 @@ const layer = Layer.effect(
   }),
 )
 
-export const node = makeLocationNode({ service: Service, layer, deps: [Bus.node, Global.node] })
+export const node = makeLocationNode({ service: Service, layer, deps: [Bus.node] })

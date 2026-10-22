@@ -26,7 +26,6 @@ const legacySources = [
 const sourceDirectories = ["agent", "agents", "mode", "modes"] as const
 const decodeAgent = Schema.decodeUnknownOption(ConfigAgent.Info)
 const decodeLegacyAgent = Schema.decodeUnknownOption(ConfigAgentV1.Info)
-const decodeConfig = Schema.decodeUnknownOption(Info)
 type PathAction = FileAccess.ExternalDirectoryAuthorization["action"] | typeof ReadTool.name | typeof EditTool.name
 const pathActions = ["external_directory", "read", "edit"] as const satisfies readonly PathAction[]
 const agentKeys = new Set(["variant", ...Object.keys(ConfigAgent.Info.fields)])
@@ -196,17 +195,14 @@ function decode(file: { directory: string; filepath: string; primary: boolean },
   const agent = legacy
     ? Option.getOrUndefined(
         Option.map(
-          decodeLegacyAgent({ name, ...markdown.data, prompt: body }, { errors: "all", propertyOrder: "original" }),
+          decodeLegacyAgent({ name, ...markdown.data, prompt: body }, { errors: "all" }),
           ConfigMigrateV1.migrateAgent,
         ),
       )
-    : Option.getOrUndefined(decodeAgent({ ...data, system: body }, { errors: "all", propertyOrder: "original" }))
+    : Option.getOrUndefined(decodeAgent({ ...data, system: body }, { errors: "all" }))
   if (!agent) return
-  const info = Option.getOrUndefined(
-    decodeConfig({
-      agents: { [name]: file.primary ? { ...agent, mode: "primary" } : agent },
-    }),
-  )
-  if (!info) return
+  const info = Info.make({
+    agents: { [name]: file.primary ? ConfigAgent.Info.make({ ...agent, mode: "primary" }) : agent },
+  })
   return new Document({ type: "document", path: AbsolutePath.make(file.filepath), info })
 }

@@ -1,8 +1,8 @@
 import { describe, expect } from "bun:test"
 import { Effect, Layer } from "effect"
-import { HttpClientRequest } from "effect/unstable/http"
+import { HttpClientRequest } from "effect/http"
 import { Evaluation, EvaluationClient } from "../src/experimental.js"
-import { OpenCodeZen, OpenRouter, TypeSafeAI, VercelAIGateway } from "../src/providers.js"
+import { OpenCode, OpenRouter, TypeSafeAI, VercelAIGateway } from "../src/providers.js"
 import { it } from "./lib/effect.js"
 import { dynamicResponse } from "./lib/http.js"
 
@@ -39,17 +39,18 @@ describe("experimental Evaluation", () => {
         type: "choice",
         choice: "billing",
         probabilities: { billing: 0.9, technical: 0.1 },
+        confidence: 0.8,
       })
       expect(response.answers.urgency).toEqual({
         type: "score",
         score: 1.2,
         probabilities: { "0": 0, "1": 0.8, "2": 0.2 },
+        confidence: 0.6,
       })
       expect(response.answers.refund).toEqual({ type: "boolean", probability: 0.97 })
       expect(response.usage?.totalTokens).toBe(36)
       expect(response.providerMetadata).toEqual({
         typesafe: {
-          confidence: { department: 0.8, urgency: 0.6 },
           legend: { urgency: { "0": "Can wait", "1": "Needs attention", "2": "Blocking" } },
         },
       })
@@ -115,9 +116,9 @@ describe("experimental Evaluation", () => {
     ),
   )
 
-  it.effect("configures the OpenCode Zen System One endpoint", () =>
+  it.effect("configures the OpenCode System One endpoint", () =>
     Evaluation.run({
-      model: OpenCodeZen.configure({ apiKey: "zen-key", baseURL: "https://zen.test/v1" }).experimental.evaluation(
+      model: OpenCode.configure({ apiKey: "opencode-key", baseURL: "https://opencode.test/v1" }).experimental.evaluation(
         "jev-1.13",
       ),
       state: "hello",
@@ -135,8 +136,8 @@ describe("experimental Evaluation", () => {
         EvaluationClient.layer.pipe(
           Layer.provide(
             dynamicResponse((input) => {
-              expect(input.request.url).toBe("https://zen.test/v1/systemone")
-              expect(input.request.headers.authorization).toBe("Bearer zen-key")
+              expect(input.request.url).toBe("https://opencode.test/v1/systemone")
+              expect(input.request.headers.authorization).toBe("Bearer opencode-key")
               return Effect.succeed(
                 input.respond(
                   JSON.stringify({

@@ -1,16 +1,19 @@
 import { Clock, Duration, Effect, Schema, type Stream } from "effect"
-import { HttpClientResponse } from "effect/unstable/http"
+import { HttpClientResponse } from "effect/http"
 import type { Snapshot, Status } from "../generation.js"
 import { Media } from "../media.js"
 import type { AuthInput } from "./auth.js"
+import { RequestExecutor } from "./executor.js"
 import {
   AIError,
+  AuthenticationError,
   ContentPolicyError,
-  HttpContext,
+  type HttpContext,
   InvalidProviderOutputError,
   InvalidRequestError,
   ProviderID,
   ProviderInternalError,
+  RateLimitError,
   UnsupportedOperationError,
 } from "../schema/index.js"
 
@@ -188,8 +191,15 @@ export const stream = <Request, Event, Frame, State>(
 // Response helpers
 // ---------------------------------------------------------------------------
 
-const context = (response: HttpClientResponse.HttpClientResponse) =>
-  new HttpContext({ url: response.request.url, status: response.status, headers: response.headers })
+/** Reasons a provider can report for a `failed` generation; anything it does not classify is `ProviderInternal`. */
+const FAILURES = {
+  InvalidRequest: InvalidRequestError,
+  Authentication: AuthenticationError,
+  RateLimit: RateLimitError,
+  ProviderInternal: ProviderInternalError,
+}
+
+export type Failure = keyof typeof FAILURES
 
 /** One protocol's route id, display name, and provider, with the decoders and errors that carry them. */
 export const identity = (input: { readonly id: string; readonly name: string; readonly provider: string }) => {
@@ -199,12 +209,13 @@ export const identity = (input: { readonly id: string; readonly name: string; re
 
   /**
    * Read a text body while retaining the original payload and HTTP context on every downstream error. `invalid` is a
-   * malformed provider document; `ended` is a generation that reached a terminal status without output (`failed` is
-   * provider-side, `cancelled`/`expired` mean the result will never exist); `pending` is a `result()` read before the
-   * generation finished, which is caller misuse; `contentPolicy` is a moderated result.
+   * malformed provider document; `ended` is a generation that reached a terminal status without output (`failed`
+   * carries the provider's classification, defaulting to `ProviderInternal`; `cancelled`/`expired` mean the result
+   * will never exist); `pending` is a `result()` read before the generation finished, which is caller misuse;
+   * `contentPolicy` is a moderated result.
    */
   const text = Effect.fn("MediaProtocol.text")(function* (response: HttpClientResponse.HttpClientResponse) {
-    const http = context(response)
+    const http = RequestExecutor.responseHttp(response)
     const body = yield* response.text.pipe(
       Effect.mapError(
         (cause) =>
@@ -223,11 +234,15 @@ export const identity = (input: { readonly id: string; readonly name: string; re
       http,
       invalid: (message: string, cause?: unknown) =>
         new AIError({ reason: new InvalidProviderOutputError({ route: input.id, message, body, http, cause }) }),
-      ended: (status: Exclude<Status, "queued" | "running" | "completed">, message: string) =>
+      ended: (
+        status: Exclude<Status, "queued" | "running" | "completed">,
+        message: string,
+        failure: Failure = "ProviderInternal",
+      ) =>
         new AIError({
           reason:
             status === "failed"
-              ? new ProviderInternalError({ message, body, http })
+              ? new FAILURES[failure]({ message, body, http })
               : new InvalidRequestError({ message, body, http }),
         }),
       pending: (id: string) =>
@@ -302,6 +317,10 @@ export const status = <Table extends Record<string, Status>>(
   if (!Object.hasOwn(table, raw)) return Effect.fail(output.invalid(`Unknown generation status "${raw}"`))
   return Effect.succeed(table[raw])
 }
+
+/** Map a provider error code through the protocol's table; missing or unmapped codes are `ProviderInternal`. */
+export const failure = (table: Readonly<Record<string, Failure>>, code: string | number | undefined): Failure =>
+  code !== undefined && Object.hasOwn(table, code) ? table[code] : "ProviderInternal"
 
 /** A `url` asset whose provider-declared retention window starts now. */
 export const expiringUrl = (url: string, retention: Duration.Duration, options?: Parameters<typeof Media.url>[1]) =>
